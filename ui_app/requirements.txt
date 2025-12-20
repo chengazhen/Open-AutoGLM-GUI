@@ -1,0 +1,6 @@
+# Gradio UI 应用依赖
+gradio>=4.0.0
+# 继承项目原有依赖
+Pillow>=12.0.0
+openai>=2.9.0
+requests>=2.31.0
