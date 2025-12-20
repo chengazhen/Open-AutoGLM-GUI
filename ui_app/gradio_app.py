@@ -23,8 +23,8 @@ class GradioApp:
         self.action_logs: List[str] = []  # 存储详细的操作日志
         
     def update_config(self, base_url: str, model: str, api_key: str, device_type: str, 
-                     device_id: str, lang: str, max_steps: int) -> str:
-        """更新配置"""
+                     device_id: str, lang: str, max_steps: int, console_output: bool) -> Tuple[str, gr.Dropdown]:
+        """更新配置并保存到浏览器缓存，同时刷新设备列表"""
         try:
             # 创建新配置
             new_config = AgentConfig(
@@ -35,50 +35,73 @@ class GradioApp:
                 device_id=device_id.strip() if device_id else None,
                 lang=lang,
                 max_steps=max_steps,
-                verbose=True
+                verbose=True,
+                console_output=console_output
             )
             
             # 验证配置
             is_valid, msg = new_config.validate()
             if not is_valid:
-                return f"❌ 配置验证失败: {msg}"
+                return f"❌ 配置验证失败: {msg}", gr.Dropdown(choices=[])
             
             # 更新配置
             self.current_config = new_config
             self.agent_wrapper = AgentWrapper(self.current_config)
             
+            # 获取设备列表
+            devices = self.agent_wrapper.get_available_devices()
+            device_choices = devices if devices else []
+            
             # 测试连接
             success, test_msg = self.agent_wrapper.test_connection()
-            if success:
-                return f"✅ 配置更新成功！{test_msg}"
+            
+            # 构建状态消息
+            if devices:
+                device_info = f"\n\n📱 **检测到 {len(devices)} 个设备**: {', '.join(devices)}"
             else:
-                return f"⚠️ 配置已更新，但连接测试失败: {test_msg}"
+                device_info = "\n\n⚠️ **未检测到设备**，请确保设备已连接并开启调试模式"
+            
+            if success:
+                status_msg = f"✅ 配置更新成功并已保存到浏览器缓存！{test_msg}{device_info}"
+            else:
+                status_msg = f"⚠️ 配置已更新并保存，但连接测试失败: {test_msg}{device_info}"
+            
+            return status_msg, gr.Dropdown(choices=device_choices, value=device_id if device_id in device_choices else (device_choices[0] if device_choices else None))
                 
         except Exception as e:
-            return f"❌ 配置更新失败: {str(e)}"
+            return f"❌ 配置更新失败: {str(e)}", gr.Dropdown(choices=[])
     
-    def chat_with_agent(self, message: str, history: List[dict]) -> Tuple[List[dict], str]:
-        """与 Agent 对话"""
+    
+    def chat_with_agent(self, message: str, history: List[dict]):
+        """与 Agent 对话 - 支持流式输出"""
         if not message.strip():
-            return history, ""
+            yield history, ""
+            return
         
         if not self.agent_wrapper:
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": "❌ 请先配置 Agent 参数"})
-            return history, ""
+            yield history, ""
+            return
         
         # 添加用户消息到历史
         history.append({"role": "user", "content": message})
+        yield history, ""
         
         # 创建一个详细的执行日志
         execution_log = []
+        current_response = "## 📋 执行详情\n\n🚀 **正在启动任务...**"
+        
+        # 添加初始的助手消息
+        history.append({"role": "assistant", "content": current_response})
+        yield history, ""
         
         try:
             # 执行任务
             result_generator = self.agent_wrapper.run_task_async(message)
             final_result = ""
             
-            # 收集所有执行步骤
+            # 实时处理执行步骤
             for step_info in result_generator:
                 if isinstance(step_info, dict):
                     # 格式化步骤信息
@@ -91,10 +114,20 @@ class GradioApp:
                         formatted_step = f"🚀 **开始执行** - {step_message}"
                     elif step_type == "thinking":
                         formatted_step = step_message  # 思考过程已经包含完整格式
+                    elif step_type == "thinking_start":
+                        formatted_step = step_message
                     elif step_type == "performance":
                         formatted_step = step_message  # 性能指标已经包含完整格式
+                    elif step_type == "performance_start":
+                        formatted_step = step_message
                     elif step_type == "action":
                         formatted_step = step_message  # 执行动作已经包含完整格式
+                    elif step_type == "action_start":
+                        formatted_step = step_message
+                    elif step_type == "operation":
+                        formatted_step = step_message
+                    elif step_type == "step_separator":
+                        formatted_step = step_message
                     elif step_type == "takeover":
                         formatted_step = step_message  # 人工接管已经包含完整格式
                     elif step_type == "success":
@@ -115,27 +148,40 @@ class GradioApp:
                     self.action_logs.append(f"[{timestamp_str}] {formatted_step}")
                 else:
                     # 兼容旧格式
-                    execution_log.append(f"ℹ️ {step_info}")
+                    formatted_step = f"ℹ️ {step_info}"
+                    execution_log.append(formatted_step)
                     final_result = str(step_info)
                     # 添加到全局日志
                     timestamp_str = time.strftime("%H:%M:%S", time.localtime())
-                    self.action_logs.append(f"[{timestamp_str}] ℹ️ {step_info}")
+                    self.action_logs.append(f"[{timestamp_str}] {formatted_step}")
+                
+                # 实时更新显示内容
+                current_response = "## 📋 执行详情\n\n" + "\n\n".join(execution_log)
+                
+                # 如果还在执行中，添加进度指示
+                if step_type not in ["success", "error", "stop"]:
+                    current_response += "\n\n⏳ **执行中...**"
+                
+                # 更新历史记录中的最后一条助手消息
+                history[-1] = {"role": "assistant", "content": current_response}
+                yield history, ""
             
-            # 构建完整的回复内容
+            # 构建最终的回复内容
             if execution_log:
-                detailed_response = "## 📋 执行详情\n\n" + "\n\n".join(execution_log)
+                final_response = "## 📋 执行详情\n\n" + "\n\n".join(execution_log)
                 if final_result and not any("任务完成" in log for log in execution_log):
-                    detailed_response += f"\n\n## 🎯 最终结果\n{final_result}"
+                    final_response += f"\n\n## 🎯 最终结果\n{final_result}"
             else:
-                detailed_response = final_result or "❓ 任务完成，但没有返回详细信息"
+                final_response = final_result or "❓ 任务完成，但没有返回详细信息"
             
-            history.append({"role": "assistant", "content": detailed_response})
+            # 最终更新
+            history[-1] = {"role": "assistant", "content": final_response}
+            yield history, ""
                 
         except Exception as e:
             error_msg = f"❌ **执行失败**\n\n```\n{str(e)}\n```"
-            history.append({"role": "assistant", "content": error_msg})
-        
-        return history, ""
+            history[-1] = {"role": "assistant", "content": error_msg}
+            yield history, ""
     
     def stop_current_task(self) -> str:
         """停止当前任务"""
@@ -144,6 +190,28 @@ class GradioApp:
             return "⏹️ 任务已停止"
         else:
             return "ℹ️ 当前没有运行中的任务"
+    
+    def get_available_devices_list(self, device_type: str) -> gr.Dropdown:
+        """获取可用设备列表"""
+        try:
+            # 创建临时配置来获取设备列表
+            temp_config = AgentConfig(
+                base_url=self.current_config.base_url,
+                model=self.current_config.model,
+                api_key=self.current_config.api_key,
+                device_type=device_type,
+                device_id=None,
+                lang=self.current_config.lang,
+                max_steps=self.current_config.max_steps,
+                verbose=True,
+                console_output=self.current_config.console_output
+            )
+            temp_wrapper = AgentWrapper(temp_config)
+            devices = temp_wrapper.get_available_devices()
+            return gr.Dropdown(choices=devices if devices else [], value=None)
+        except Exception as e:
+            print(f"获取设备列表失败: {str(e)}")
+            return gr.Dropdown(choices=[], value=None)
     
     def get_status_info(self) -> str:
         """获取状态信息"""
@@ -224,12 +292,14 @@ class GradioApp:
                                 value=self.current_config.device_type,
                                 info="设备类型"
                             )
-                            device_id_input = gr.Textbox(
-                                label="Device ID (可选)",
-                                value=self.current_config.device_id or "",
-                                placeholder="192.168.1.100:5555",
-                                info="指定设备 ID，留空自动检测"
+                            device_id_input = gr.Dropdown(
+                                label="Device ID",
+                                choices=[],
+                                value=self.current_config.device_id or None,
+                                allow_custom_value=True,
+                                info="选择或输入设备 ID，留空自动检测"
                             )
+                            refresh_devices_btn = gr.Button("🔄 刷新设备列表", size="sm")
                             lang_input = gr.Dropdown(
                                 label="Language",
                                 choices=["cn", "en"],
@@ -244,12 +314,16 @@ class GradioApp:
                                 step=10,
                                 info="每个任务最大步数"
                             )
+                            console_output_input = gr.Checkbox(
+                                label="终端日志输出",
+                                value=self.current_config.console_output,
+                                info="是否同时在终端显示执行日志"
+                            )
                     
                     with gr.Row():
                         update_config_btn = gr.Button("🔄 更新配置", variant="primary")
-                        status_btn = gr.Button("📊 查看状态")
                     
-                    config_status = gr.Markdown("ℹ️ 请点击'更新配置'来应用设置")
+                    config_status = gr.Markdown("ℹ️ **配置说明**：\n- 🔄 **更新配置**：应用配置并自动保存到浏览器缓存（下次访问时自动加载）")
                 
                 # 对话标签页
                 with gr.TabItem("💬 对话"):
@@ -311,8 +385,22 @@ class GradioApp:
             update_config_btn.click(
                 fn=self.update_config,
                 inputs=[base_url_input, model_input, api_key_input, device_type_input, 
-                       device_id_input, lang_input, max_steps_input],
-                outputs=config_status
+                       device_id_input, lang_input, max_steps_input, console_output_input],
+                outputs=[config_status, device_id_input]
+            )
+            
+            # 设备类型改变时刷新设备列表
+            device_type_input.change(
+                fn=self.get_available_devices_list,
+                inputs=[device_type_input],
+                outputs=[device_id_input]
+            )
+            
+            # 手动刷新设备列表
+            refresh_devices_btn.click(
+                fn=self.get_available_devices_list,
+                inputs=[device_type_input],
+                outputs=[device_id_input]
             )
             
             send_btn.click(
@@ -330,11 +418,6 @@ class GradioApp:
             stop_btn.click(
                 fn=self.stop_current_task,
                 outputs=config_status
-            )
-            
-            status_btn.click(
-                fn=self.get_status_info,
-                outputs=status_display
             )
             
             refresh_status_btn.click(
@@ -357,6 +440,120 @@ class GradioApp:
             app.load(
                 fn=self.get_action_logs,
                 outputs=action_log
+            )
+            
+            # 添加 JavaScript 代码实现浏览器缓存功能
+            app.load(
+                js="""
+                function() {
+                    // 从浏览器缓存加载配置
+                    function loadConfigFromCache() {
+                        const config = localStorage.getItem('autoglm_config');
+                        if (config) {
+                            try {
+                                const parsed = JSON.parse(config);
+                                
+                                // 查找所有标签元素并更新对应的输入值
+                                const labels = document.querySelectorAll('label');
+                                labels.forEach(label => {
+                                    const labelText = label.textContent.trim();
+                                    const container = label.closest('.block');
+                                    if (!container) return;
+                                    
+                                    const input = container.querySelector('input, select, textarea');
+                                    if (!input) return;
+                                    
+                                    if (labelText === 'Base URL' && parsed.base_url) {
+                                        input.value = parsed.base_url;
+                                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    } else if (labelText === 'Model' && parsed.model) {
+                                        input.value = parsed.model;
+                                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    } else if (labelText === 'API Key' && parsed.api_key) {
+                                        input.value = parsed.api_key;
+                                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    } else if (labelText === 'Device Type' && parsed.device_type) {
+                                        input.value = parsed.device_type;
+                                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                                    } else if (labelText === 'Device ID' && parsed.device_id) {
+                                        input.value = parsed.device_id;
+                                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    } else if (labelText === 'Language' && parsed.lang) {
+                                        input.value = parsed.lang;
+                                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                                    } else if (labelText === 'Max Steps' && parsed.max_steps) {
+                                        input.value = parsed.max_steps;
+                                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                                    } else if (labelText === '终端日志输出' && parsed.console_output !== undefined) {
+                                        input.checked = parsed.console_output;
+                                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }
+                                });
+                                
+                                console.log('配置已从浏览器缓存加载:', parsed);
+                            } catch (e) {
+                                console.error('加载配置失败:', e);
+                            }
+                        }
+                    }
+                    
+                    // 保存配置到浏览器缓存
+                    function saveConfigToCache() {
+                        const config = {};
+                        
+                        // 查找所有标签元素
+                        const labels = document.querySelectorAll('label');
+                        labels.forEach(label => {
+                            const labelText = label.textContent.trim();
+                            // 找到标签对应的输入元素
+                            const container = label.closest('.block');
+                            if (!container) return;
+                            
+                            const input = container.querySelector('input, select, textarea');
+                            if (!input) return;
+                            
+                            if (labelText === 'Base URL') {
+                                config.base_url = input.value;
+                            } else if (labelText === 'Model') {
+                                config.model = input.value;
+                            } else if (labelText === 'API Key') {
+                                config.api_key = input.value;
+                            } else if (labelText === 'Device Type') {
+                                config.device_type = input.value;
+                            } else if (labelText === 'Device ID') {
+                                config.device_id = input.value;
+                            } else if (labelText === 'Language') {
+                                config.lang = input.value;
+                            } else if (labelText === 'Max Steps') {
+                                config.max_steps = parseInt(input.value);
+                            } else if (labelText === '终端日志输出') {
+                                config.console_output = input.checked;
+                            }
+                        });
+                        
+                        localStorage.setItem('autoglm_config', JSON.stringify(config));
+                        console.log('配置已保存到浏览器缓存:', config);
+                    }
+                    
+                    
+                    // 延迟加载配置，等待页面完全渲染
+                    setTimeout(() => {
+                        loadConfigFromCache();
+                        
+                        // 监听更新配置按钮点击事件，自动保存到缓存
+                        const updateBtn = Array.from(document.querySelectorAll('button')).find(btn => 
+                            btn.textContent.includes('更新配置')
+                        );
+                        if (updateBtn) {
+                            updateBtn.addEventListener('click', () => {
+                                setTimeout(saveConfigToCache, 100);
+                            });
+                        }
+                    }, 1000);
+                    
+                    return [];
+                }
+                """
             )
         
         return app

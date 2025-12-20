@@ -19,6 +19,7 @@ class AgentConfig:
     lang: str = "cn"
     max_steps: int = 100
     verbose: bool = True
+    console_output: bool = True  # 是否同时输出到控制台
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -31,6 +32,7 @@ class AgentConfig:
             device_id=os.getenv("PHONE_AGENT_DEVICE_ID"),
             lang=os.getenv("PHONE_AGENT_LANG", "cn"),
             max_steps=int(os.getenv("PHONE_AGENT_MAX_STEPS", "100")),
+            console_output=os.getenv("PHONE_AGENT_CONSOLE_OUTPUT", "true").lower() == "true",
         )
 
     def to_dict(self) -> dict:
@@ -44,6 +46,7 @@ class AgentConfig:
             "lang": self.lang,
             "max_steps": self.max_steps,
             "verbose": self.verbose,
+            "console_output": self.console_output,
         }
 
     def validate(self) -> tuple[bool, str]:

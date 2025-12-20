@@ -109,19 +109,63 @@ class AgentWrapper:
                     import sys
                     from contextlib import redirect_stdout, redirect_stderr
                     
-                    # 捕获 Agent 的详细输出
-                    captured_output = io.StringIO()
+                    # 创建一个实时解析输出的类
+                    class RealTimeOutput:
+                        def __init__(self, original_stream, step_queue, parser_func):
+                            self.original = original_stream
+                            self.step_queue = step_queue
+                            self.parser_func = parser_func
+                            self.buffer = ""
+                            self.all_output = io.StringIO()
+                        
+                        def write(self, text):
+                            if self.original and hasattr(self.original, 'write'):
+                                self.original.write(text)  # 输出到终端
+                            self.all_output.write(text)  # 保存所有输出
+                            
+                            # 实时解析输出
+                            self.buffer += text
+                            lines = self.buffer.split('\n')
+                            
+                            # 保留最后一行（可能不完整）
+                            self.buffer = lines[-1]
+                            
+                            # 处理完整的行
+                            for line in lines[:-1]:
+                                if line.strip():
+                                    self.parser_func(line.strip(), self.step_queue)
+                            
+                            return len(text)
+                        
+                        def flush(self):
+                            if self.original and hasattr(self.original, 'flush'):
+                                self.original.flush()
+                            self.all_output.flush()
+                            
+                            # 处理缓冲区中剩余的内容
+                            if self.buffer.strip():
+                                self.parser_func(self.buffer.strip(), self.step_queue)
+                                self.buffer = ""
                     
-                    with redirect_stdout(captured_output), redirect_stderr(captured_output):
+                    # 创建实时输出处理器
+                    if self.config.console_output:
+                        realtime_stdout = RealTimeOutput(sys.stdout, step_queue, self._parse_line_realtime)
+                        realtime_stderr = RealTimeOutput(sys.stderr, step_queue, self._parse_line_realtime)
+                    else:
+                        realtime_stdout = RealTimeOutput(None, step_queue, self._parse_line_realtime)
+                        realtime_stderr = RealTimeOutput(None, step_queue, self._parse_line_realtime)
+                    
+                    # 使用实时输出重定向
+                    with redirect_stdout(realtime_stdout), redirect_stderr(realtime_stderr):
                         # 确保 Agent 使用 verbose 模式
                         if hasattr(self.agent, 'agent_config'):
                             self.agent.agent_config.verbose = True
                         
                         result = self.agent.run(task)
                     
-                    # 解析捕获的输出
-                    output_lines = captured_output.getvalue().split('\n')
-                    self._parse_agent_output(output_lines, step_queue)
+                    # 确保所有缓冲区内容都被处理
+                    realtime_stdout.flush()
+                    realtime_stderr.flush()
                     
                     result_queue.put(result)
                     
@@ -142,7 +186,7 @@ class AgentWrapper:
                 except queue.Empty:
                     pass
                 
-                time.sleep(0.5)  # 更频繁的检查
+                time.sleep(0.1)  # 更频繁的检查，提高实时性
             
             # 输出剩余的步骤信息
             while not step_queue.empty():
@@ -178,8 +222,74 @@ class AgentWrapper:
         finally:
             self.is_running = False
     
+    def _parse_line_realtime(self, line: str, step_queue: queue.Queue):
+        """实时解析单行输出"""
+        line = line.strip()
+        if not line:
+            return
+            
+        # 检测重要的输出行并立即发送
+        if "💭 思考过程:" in line:
+            step_queue.put({
+                "type": "thinking_start", 
+                "message": "💭 **开始思考...**", 
+                "timestamp": time.time()
+            })
+        elif "⏱️  性能指标:" in line:
+            step_queue.put({
+                "type": "performance_start", 
+                "message": "⏱️ **性能分析中...**", 
+                "timestamp": time.time()
+            })
+        elif "🎯 执行动作:" in line:
+            step_queue.put({
+                "type": "action_start", 
+                "message": "🎯 **准备执行动作...**", 
+                "timestamp": time.time()
+            })
+        elif "Parsing action:" in line:
+            # 解析执行的动作
+            action_info = line.replace("Parsing action:", "").strip()
+            step_queue.put({
+                "type": "action", 
+                "message": f"🎯 **执行动作**: {action_info}", 
+                "timestamp": time.time()
+            })
+        elif "Press Enter after completing manual operation" in line:
+            step_queue.put({
+                "type": "takeover", 
+                "message": "🤝 **人工接管**: 需要手动完成操作", 
+                "timestamp": time.time()
+            })
+        elif "✅" in line and ("任务完成" in line or "Task completed" in line):
+            step_queue.put({
+                "type": "success", 
+                "message": f"✅ **{line}**", 
+                "timestamp": time.time()
+            })
+        elif "❌" in line and ("错误" in line or "Error" in line or "Failed" in line):
+            step_queue.put({
+                "type": "error", 
+                "message": f"❌ **{line}**", 
+                "timestamp": time.time()
+            })
+        elif line.startswith("==") and line.endswith("=="):
+            # 分隔线，表示新的步骤开始
+            step_queue.put({
+                "type": "step_separator", 
+                "message": "📍 **新步骤开始**", 
+                "timestamp": time.time()
+            })
+        elif any(keyword in line for keyword in ["截图", "screenshot", "点击", "click", "输入", "input", "滑动", "swipe"]):
+            # 操作相关的输出
+            step_queue.put({
+                "type": "operation", 
+                "message": f"🔧 **操作**: {line}", 
+                "timestamp": time.time()
+            })
+
     def _parse_agent_output(self, output_lines: list, step_queue: queue.Queue):
-        """解析 Agent 的详细输出"""
+        """解析 Agent 的详细输出（保留用于兼容性）"""
         current_section = None
         section_content = []
         
@@ -261,3 +371,27 @@ class AgentWrapper:
             "config": self.config.to_dict(),
             "agent_created": self.agent is not None,
         }
+    
+    def get_available_devices(self) -> list[str]:
+        """获取可用设备列表"""
+        try:
+            from phone_agent.device_factory import DeviceFactory, DeviceType
+            
+            # 根据配置的设备类型创建工厂
+            if self.config.device_type == "adb":
+                device_type = DeviceType.ADB
+            elif self.config.device_type == "hdc":
+                device_type = DeviceType.HDC
+            elif self.config.device_type == "ios":
+                device_type = DeviceType.IOS
+            else:
+                device_type = DeviceType.ADB
+            
+            factory = DeviceFactory(device_type)
+            devices = factory.list_devices()
+            
+            # 返回设备 ID 列表
+            return [device.device_id for device in devices]
+        except Exception as e:
+            print(f"获取设备列表失败: {str(e)}")
+            return []
