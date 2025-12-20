@@ -18,13 +18,12 @@ class GradioApp:
     
     def __init__(self):
         self.agent_wrapper: Optional[AgentWrapper] = None
-        self.current_config = AgentConfig.from_env()
+        self.current_config = AgentConfig.from_file()
         self.chat_history: List[dict] = []
-        self.action_logs: List[str] = []  # 存储详细的操作日志
         
     def update_config(self, base_url: str, model: str, api_key: str, device_type: str, 
                      device_id: str, lang: str, max_steps: int, console_output: bool) -> Tuple[str, gr.Dropdown]:
-        """更新配置并保存到浏览器缓存，同时刷新设备列表"""
+        """更新配置并刷新设备列表"""
         try:
             # 创建新配置
             new_config = AgentConfig(
@@ -62,9 +61,9 @@ class GradioApp:
                 device_info = "\n\n⚠️ **未检测到设备**，请确保设备已连接并开启调试模式"
             
             if success:
-                status_msg = f"✅ 配置更新成功并已保存到浏览器缓存！{test_msg}{device_info}"
+                status_msg = f"✅ 配置更新成功！{test_msg}{device_info}"
             else:
-                status_msg = f"⚠️ 配置已更新并保存，但连接测试失败: {test_msg}{device_info}"
+                status_msg = f"⚠️ 配置已更新，但连接测试失败: {test_msg}{device_info}"
             
             return status_msg, gr.Dropdown(choices=device_choices, value=device_id if device_id in device_choices else (device_choices[0] if device_choices else None))
                 
@@ -143,17 +142,11 @@ class GradioApp:
                         formatted_step = f"ℹ️ **信息** - {step_message}"
                     
                     execution_log.append(formatted_step)
-                    # 同时添加到全局操作日志
-                    timestamp_str = time.strftime("%H:%M:%S", time.localtime(timestamp))
-                    self.action_logs.append(f"[{timestamp_str}] {formatted_step}")
                 else:
                     # 兼容旧格式
                     formatted_step = f"ℹ️ {step_info}"
                     execution_log.append(formatted_step)
                     final_result = str(step_info)
-                    # 添加到全局日志
-                    timestamp_str = time.strftime("%H:%M:%S", time.localtime())
-                    self.action_logs.append(f"[{timestamp_str}] {formatted_step}")
                 
                 # 实时更新显示内容
                 current_response = "## 📋 执行详情\n\n" + "\n\n".join(execution_log)
@@ -229,29 +222,6 @@ class GradioApp:
 - Language: {status['config']['lang']}
 """
     
-    def get_action_logs(self) -> str:
-        """获取操作日志"""
-        if not self.action_logs:
-            return "暂无执行日志，请在对话标签页执行任务后查看详细日志。"
-        
-        # 显示最近的50条日志
-        recent_logs = self.action_logs[-50:] if len(self.action_logs) > 50 else self.action_logs
-        return "\n\n".join(recent_logs)
-    
-    def clear_action_logs(self) -> str:
-        """清空操作日志"""
-        self.action_logs.clear()
-        return "✅ 操作日志已清空"
-    
-    def export_action_logs(self) -> str:
-        """导出操作日志"""
-        if not self.action_logs:
-            return "❌ 暂无日志可导出"
-        
-        # 这里可以实现导出到文件的功能
-        log_content = "\n".join(self.action_logs)
-        return f"📋 **操作日志导出**\n\n```\n{log_content}\n```"
-    
     def create_interface(self):
         """创建 Gradio 界面"""
         with gr.Blocks(title="AutoGLM Phone Agent UI") as app:
@@ -323,7 +293,7 @@ class GradioApp:
                     with gr.Row():
                         update_config_btn = gr.Button("🔄 更新配置", variant="primary")
                     
-                    config_status = gr.Markdown("ℹ️ **配置说明**：\n- 🔄 **更新配置**：应用配置并自动保存到浏览器缓存（下次访问时自动加载）")
+                    config_status = gr.Markdown("ℹ️ **配置说明**：\n- 🔄 **更新配置**：应用配置到当前会话")
                 
                 # 对话标签页
                 with gr.TabItem("💬 对话"):
@@ -366,20 +336,6 @@ class GradioApp:
                     gr.Markdown("## 系统状态")
                     status_display = gr.Markdown(self.get_status_info())
                     refresh_status_btn = gr.Button("🔄 刷新状态")
-                
-                # 操作日志标签页
-                with gr.TabItem("📝 操作日志"):
-                    gr.Markdown("## 详细执行日志")
-                    gr.Markdown("显示 Agent 执行过程中的所有思考过程和操作动作")
-                    
-                    action_log = gr.Markdown(
-                        "暂无执行日志，请在对话标签页执行任务后查看详细日志。",
-                        height=400
-                    )
-                    
-                    with gr.Row():
-                        clear_log_btn = gr.Button("🗑️ 清空日志")
-                        export_log_btn = gr.Button("📤 导出日志")
             
             # 事件绑定
             update_config_btn.click(
@@ -423,137 +379,6 @@ class GradioApp:
             refresh_status_btn.click(
                 fn=self.get_status_info,
                 outputs=status_display
-            )
-            
-            # 操作日志事件绑定
-            clear_log_btn.click(
-                fn=self.clear_action_logs,
-                outputs=action_log
-            )
-            
-            export_log_btn.click(
-                fn=self.export_action_logs,
-                outputs=action_log
-            )
-            
-            # 初始化操作日志显示
-            app.load(
-                fn=self.get_action_logs,
-                outputs=action_log
-            )
-            
-            # 添加 JavaScript 代码实现浏览器缓存功能
-            app.load(
-                js="""
-                function() {
-                    // 从浏览器缓存加载配置
-                    function loadConfigFromCache() {
-                        const config = localStorage.getItem('autoglm_config');
-                        if (config) {
-                            try {
-                                const parsed = JSON.parse(config);
-                                
-                                // 查找所有标签元素并更新对应的输入值
-                                const labels = document.querySelectorAll('label');
-                                labels.forEach(label => {
-                                    const labelText = label.textContent.trim();
-                                    const container = label.closest('.block');
-                                    if (!container) return;
-                                    
-                                    const input = container.querySelector('input, select, textarea');
-                                    if (!input) return;
-                                    
-                                    if (labelText === 'Base URL' && parsed.base_url) {
-                                        input.value = parsed.base_url;
-                                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                                    } else if (labelText === 'Model' && parsed.model) {
-                                        input.value = parsed.model;
-                                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                                    } else if (labelText === 'API Key' && parsed.api_key) {
-                                        input.value = parsed.api_key;
-                                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                                    } else if (labelText === 'Device Type' && parsed.device_type) {
-                                        input.value = parsed.device_type;
-                                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                                    } else if (labelText === 'Device ID' && parsed.device_id) {
-                                        input.value = parsed.device_id;
-                                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                                    } else if (labelText === 'Language' && parsed.lang) {
-                                        input.value = parsed.lang;
-                                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                                    } else if (labelText === 'Max Steps' && parsed.max_steps) {
-                                        input.value = parsed.max_steps;
-                                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                                    } else if (labelText === '终端日志输出' && parsed.console_output !== undefined) {
-                                        input.checked = parsed.console_output;
-                                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                                    }
-                                });
-                                
-                                console.log('配置已从浏览器缓存加载:', parsed);
-                            } catch (e) {
-                                console.error('加载配置失败:', e);
-                            }
-                        }
-                    }
-                    
-                    // 保存配置到浏览器缓存
-                    function saveConfigToCache() {
-                        const config = {};
-                        
-                        // 查找所有标签元素
-                        const labels = document.querySelectorAll('label');
-                        labels.forEach(label => {
-                            const labelText = label.textContent.trim();
-                            // 找到标签对应的输入元素
-                            const container = label.closest('.block');
-                            if (!container) return;
-                            
-                            const input = container.querySelector('input, select, textarea');
-                            if (!input) return;
-                            
-                            if (labelText === 'Base URL') {
-                                config.base_url = input.value;
-                            } else if (labelText === 'Model') {
-                                config.model = input.value;
-                            } else if (labelText === 'API Key') {
-                                config.api_key = input.value;
-                            } else if (labelText === 'Device Type') {
-                                config.device_type = input.value;
-                            } else if (labelText === 'Device ID') {
-                                config.device_id = input.value;
-                            } else if (labelText === 'Language') {
-                                config.lang = input.value;
-                            } else if (labelText === 'Max Steps') {
-                                config.max_steps = parseInt(input.value);
-                            } else if (labelText === '终端日志输出') {
-                                config.console_output = input.checked;
-                            }
-                        });
-                        
-                        localStorage.setItem('autoglm_config', JSON.stringify(config));
-                        console.log('配置已保存到浏览器缓存:', config);
-                    }
-                    
-                    
-                    // 延迟加载配置，等待页面完全渲染
-                    setTimeout(() => {
-                        loadConfigFromCache();
-                        
-                        // 监听更新配置按钮点击事件，自动保存到缓存
-                        const updateBtn = Array.from(document.querySelectorAll('button')).find(btn => 
-                            btn.textContent.includes('更新配置')
-                        );
-                        if (updateBtn) {
-                            updateBtn.addEventListener('click', () => {
-                                setTimeout(saveConfigToCache, 100);
-                            });
-                        }
-                    }, 1000);
-                    
-                    return [];
-                }
-                """
             )
         
         return app

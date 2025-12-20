@@ -1,0 +1,17 @@
+# Phone Agent 配置文件示例
+# 复制此文件为 config.yaml 并填入你的配置
+
+# API 配置
+base_url: ""
+model: "parasail-auto-glm-9b-multilingual"
+api_key: "your-api-key-here"  # 请替换为你的 API Key
+
+# 设备配置
+device_type: "adb"  # 可选: adb, hdc, ios
+device_id: null  # 设备 ID,如果为空则自动检测
+
+# 运行配置
+lang: "cn"  # 语言: cn 或 en
+max_steps: 100  # 最大执行步数
+verbose: true  # 详细输出
+console_output: true  # 是否输出到控制台
