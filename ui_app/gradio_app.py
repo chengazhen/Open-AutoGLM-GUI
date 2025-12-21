@@ -120,7 +120,9 @@ class GradioApp:
                     elif step_type == "performance_start":
                         formatted_step = step_message
                     elif step_type == "action":
-                        formatted_step = step_message  # 执行动作已经包含完整格式
+                        formatted_step = step_message
+                    elif step_type == "action_detail":
+                        formatted_step = step_message
                     elif step_type == "action_start":
                         formatted_step = step_message
                     elif step_type == "operation":
@@ -224,7 +226,26 @@ class GradioApp:
     
     def create_interface(self):
         """创建 Gradio 界面"""
-        with gr.Blocks(title="AutoGLM Phone Agent UI") as app:
+        custom_css = """
+        .chatbot-container .message {
+            max-width: 100% !important;
+        }
+        .chatbot-container .message-wrap {
+            max-width: 100% !important;
+        }
+        .chatbot-container .bot, .chatbot-container .user {
+            max-width: 95% !important;
+        }
+        .chatbot-container pre {
+            white-space: pre-wrap !important;
+            word-wrap: break-word !important;
+            max-width: 100% !important;
+        }
+        .chatbot-container code {
+            white-space: pre-wrap !important;
+        }
+        """
+        with gr.Blocks(title="AutoGLM Phone Agent UI", css=custom_css) as app:
             gr.Markdown("# 🤖 AutoGLM Phone Agent 对话界面")
             gr.Markdown("独立的图形界面，支持对话式交互和参数配置")
             
@@ -303,7 +324,8 @@ class GradioApp:
                     chatbot = gr.Chatbot(
                         height=500,
                         placeholder="Agent 回复将显示在这里...",
-                        show_label=False
+                        show_label=False,
+                        elem_classes=["chatbot-container"]
                     )
                     
                     with gr.Row():

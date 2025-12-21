@@ -27,6 +27,9 @@ class AgentWrapper:
         self.agent = None
         self.is_running = False
         self._stop_event = threading.Event()
+        # 用于实时解析的状态
+        self._current_section = None
+        self._section_content = []
         
     def _create_agent(self):
         """创建 PhoneAgent 实例"""
@@ -223,36 +226,57 @@ class AgentWrapper:
             self.is_running = False
     
     def _parse_line_realtime(self, line: str, step_queue: queue.Queue):
-        """实时解析单行输出"""
+        """实时解析单行输出，捕获完整的段落内容"""
         line = line.strip()
         if not line:
             return
-            
-        # 检测重要的输出行并立即发送
+        
+        # 检测段落开始标记
         if "💭 思考过程:" in line:
-            step_queue.put({
-                "type": "thinking_start", 
-                "message": "💭 **开始思考...**", 
-                "timestamp": time.time()
-            })
-        elif "⏱️  性能指标:" in line:
-            step_queue.put({
-                "type": "performance_start", 
-                "message": "⏱️ **性能分析中...**", 
-                "timestamp": time.time()
-            })
+            # 先输出上一个段落
+            self._flush_section(step_queue)
+            self._current_section = "thinking"
+            self._section_content = []
+            return
+        elif "⏱️  性能指标:" in line or "⏱️ 性能指标:" in line:
+            self._flush_section(step_queue)
+            self._current_section = "performance"
+            self._section_content = []
+            return
         elif "🎯 执行动作:" in line:
-            step_queue.put({
-                "type": "action_start", 
-                "message": "🎯 **准备执行动作...**", 
-                "timestamp": time.time()
-            })
-        elif "Parsing action:" in line:
-            # 解析执行的动作
+            self._flush_section(step_queue)
+            self._current_section = "action"
+            self._section_content = []
+            return
+        
+        # 检测分隔线（段落结束标记）
+        if line.startswith("--") and line.endswith("--"):
+            # 分隔线，跳过但不结束段落
+            return
+        
+        # 检测步骤分隔线
+        if line.startswith("==") and line.endswith("=="):
+            self._flush_section(step_queue)
+            # 只在有实际内容时显示分隔
+            if line != "==================================================" or "🎉" in line:
+                step_queue.put({
+                    "type": "step_separator", 
+                    "message": "---", 
+                    "timestamp": time.time()
+                })
+            return
+        
+        # 如果在某个段落中，收集内容
+        if self._current_section:
+            self._section_content.append(line)
+            return
+        
+        # 其他特殊行的处理
+        if "Parsing action:" in line:
             action_info = line.replace("Parsing action:", "").strip()
             step_queue.put({
                 "type": "action", 
-                "message": f"🎯 **执行动作**: {action_info}", 
+                "message": f"🎯 **解析动作**: `{action_info}`", 
                 "timestamp": time.time()
             })
         elif "Press Enter after completing manual operation" in line:
@@ -264,29 +288,58 @@ class AgentWrapper:
         elif "✅" in line and ("任务完成" in line or "Task completed" in line):
             step_queue.put({
                 "type": "success", 
-                "message": f"✅ **{line}**", 
+                "message": f"{line}", 
+                "timestamp": time.time()
+            })
+        elif "🎉" in line:
+            step_queue.put({
+                "type": "success", 
+                "message": f"{line}", 
                 "timestamp": time.time()
             })
         elif "❌" in line and ("错误" in line or "Error" in line or "Failed" in line):
             step_queue.put({
                 "type": "error", 
-                "message": f"❌ **{line}**", 
-                "timestamp": time.time()
-            })
-        elif line.startswith("==") and line.endswith("=="):
-            # 分隔线，表示新的步骤开始
-            step_queue.put({
-                "type": "step_separator", 
-                "message": "📍 **新步骤开始**", 
+                "message": f"{line}", 
                 "timestamp": time.time()
             })
         elif any(keyword in line for keyword in ["截图", "screenshot", "点击", "click", "输入", "input", "滑动", "swipe"]):
-            # 操作相关的输出
             step_queue.put({
                 "type": "operation", 
-                "message": f"🔧 **操作**: {line}", 
+                "message": f"🔧 {line}", 
                 "timestamp": time.time()
             })
+    
+    def _flush_section(self, step_queue: queue.Queue):
+        """输出当前段落的完整内容"""
+        if not self._current_section or not self._section_content:
+            self._current_section = None
+            self._section_content = []
+            return
+        
+        content = "\n".join(self._section_content)
+        
+        if self._current_section == "thinking":
+            step_queue.put({
+                "type": "thinking", 
+                "message": f"💭 **思考过程**\n```\n{content}\n```", 
+                "timestamp": time.time()
+            })
+        elif self._current_section == "performance":
+            step_queue.put({
+                "type": "performance", 
+                "message": f"⏱️ **性能指标**\n```\n{content}\n```", 
+                "timestamp": time.time()
+            })
+        elif self._current_section == "action":
+            step_queue.put({
+                "type": "action_detail", 
+                "message": f"🎯 **执行动作**\n```json\n{content}\n```", 
+                "timestamp": time.time()
+            })
+        
+        self._current_section = None
+        self._section_content = []
 
     def _parse_agent_output(self, output_lines: list, step_queue: queue.Queue):
         """解析 Agent 的详细输出（保留用于兼容性）"""
