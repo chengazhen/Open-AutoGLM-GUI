@@ -17,6 +17,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from ui_app.config import AgentConfig
+from ui_app.device_manager import get_device_manager
 
 
 class AgentWrapper:
@@ -72,6 +73,16 @@ class AgentWrapper:
             if not is_valid:
                 return False, f"配置验证失败: {msg}"
             
+            # 检查设备连接状态
+            device_manager = get_device_manager()
+            device_connected, device_msg, device_info = device_manager.check_device_connection(
+                self.config.device_id, 
+                self.config.device_type
+            )
+            
+            if not device_connected:
+                return False, f"设备连接检查失败: {device_msg}"
+            
             # 尝试创建 Agent
             success, msg = self._create_agent()
             if not success:
@@ -80,7 +91,7 @@ class AgentWrapper:
             # 测试模型连接
             try:
                 # 这里可以添加简单的模型连接测试
-                return True, "连接测试成功"
+                return True, f"连接测试成功 - {device_msg}"
             except Exception as e:
                 return False, f"模型连接测试失败: {str(e)}"
                 
@@ -93,6 +104,19 @@ class AgentWrapper:
         self._stop_event.clear()
         
         try:
+            # 执行任务前的设备连接检查
+            device_manager = get_device_manager()
+            device_connected, device_msg, device_info = device_manager.check_device_connection(
+                self.config.device_id, 
+                self.config.device_type
+            )
+            
+            if not device_connected:
+                yield {"type": "error", "message": f"❌ 设备连接检查失败: {device_msg}", "timestamp": time.time()}
+                return f"设备连接检查失败: {device_msg}"
+            
+            yield {"type": "device_check", "message": f"📱 设备连接检查通过: {device_msg}", "timestamp": time.time()}
+            
             if not self.agent:
                 success, msg = self._create_agent()
                 if not success:
@@ -428,23 +452,8 @@ class AgentWrapper:
     def get_available_devices(self) -> list[str]:
         """获取可用设备列表"""
         try:
-            from phone_agent.device_factory import DeviceFactory, DeviceType
-            
-            # 根据配置的设备类型创建工厂
-            if self.config.device_type == "adb":
-                device_type = DeviceType.ADB
-            elif self.config.device_type == "hdc":
-                device_type = DeviceType.HDC
-            elif self.config.device_type == "ios":
-                device_type = DeviceType.IOS
-            else:
-                device_type = DeviceType.ADB
-            
-            factory = DeviceFactory(device_type)
-            devices = factory.list_devices()
-            
-            # 返回设备 ID 列表
-            return [device.device_id for device in devices]
+            device_manager = get_device_manager()
+            return device_manager.get_available_devices(self.config.device_type)
         except Exception as e:
             print(f"获取设备列表失败: {str(e)}")
             return []
